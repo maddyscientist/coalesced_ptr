@@ -52,14 +52,14 @@
 */
 
 #ifdef __CUDACC__
-#define OFFLOAD __device__ __host__
+#define COALESCED_PTR_OFFLOAD __device__ __host__
 #else
-#define OFFLOAD
+#define COALESCED_PTR_OFFLOAD
 #endif
 
 /* the granularity of memory transactions in bytes - current GPUs
    support 4 byte, 8 byte and 16 byte transactions per thread */
-constexpr int memory_word_size = 8;
+constexpr int memory_word_size = 4;
 
 /* the granularity of (virtual) register storage size in bytes - all
    current GPUs use 4-byte registers so just leave at 4 */
@@ -72,33 +72,33 @@ static constexpr int site_vector = 32;
 struct alignas(8) _int2 { int x, y; };
 struct alignas(16) _int4 { int x, y, z, w; };
 
-template <typename A, typename B> OFFLOAD void copy(A *a, const B *b, int n) { printf("Bork\n"); }
+template <typename A, typename B> COALESCED_PTR_OFFLOAD inline void copy(A *a, const B *b, int n) { printf("Bork\n"); }
 
-template<> OFFLOAD void copy<int,int>(int *a, const int *b, int n)
+template<> COALESCED_PTR_OFFLOAD inline void copy<int,int>(int *a, const int *b, int n)
 { for (int i=0; i<n; i++) a[i] = b[i]; }
 
-template<> OFFLOAD void copy<_int2,_int2>(_int2 *a, const _int2 *b, int n)
+template<> COALESCED_PTR_OFFLOAD inline void copy<_int2,_int2>(_int2 *a, const _int2 *b, int n)
 { for (int i=0; i<n; i++) a[i] = b[i]; }
-template<> OFFLOAD void copy<_int2,int>(_int2 *a, const int *b, int n) {
+template<> COALESCED_PTR_OFFLOAD inline void copy<_int2,int>(_int2 *a, const int *b, int n) {
   for (int i=0; i<n; i++) { a[i].x = b[2*i]; a[i].y = b[2*i+1]; }
 }
-template<> OFFLOAD void copy<_int4,int>(_int4 *a, const int *b, int n) {
+template<> COALESCED_PTR_OFFLOAD inline void copy<_int4,int>(_int4 *a, const int *b, int n) {
   for (int i=0; i<n; i++) { a[i].x = b[4*i+0]; a[i].y = b[4*i+1]; a[i].z = b[4*i+2]; a[i].w = b[4*i+3]; }
 }
 
-template<> OFFLOAD void copy<_int4,_int2>(_int4 *a, const _int2 *b, int n) {
+template<> COALESCED_PTR_OFFLOAD inline void copy<_int4,_int2>(_int4 *a, const _int2 *b, int n) {
   for (int i=0; i<n; i++) { a[i].x = b[2*i+0].x; a[i].y = b[2*i+0].y; a[i].z = b[2*i+1].x; a[i].w = b[2*i+1].y; }
 }
 
-template<> OFFLOAD void copy<int,_int2>(int *a, const _int2 *b, int n) {
+template<> COALESCED_PTR_OFFLOAD inline void copy<int,_int2>(int *a, const _int2 *b, int n) {
   for (int i=0; i<n/2; i++) { a[2*i+0] = b[i].x; a[2*i+1] = b[i].y; }
 }
 
-template<> OFFLOAD void copy<int,_int4>(int *a, const _int4 *b, int n) {
+template<> COALESCED_PTR_OFFLOAD inline void copy<int,_int4>(int *a, const _int4 *b, int n) {
   for (int i=0; i<n/4; i++) { a[4*i+0] = b[i].x; a[4*i+1] = b[i].y; a[4*i+2] = b[i].z; a[4*i+3] = b[i].w; }
 }
 
-template<> OFFLOAD void copy<_int2,_int4>(_int2 *a, const _int4 *b, int n) {
+template<> COALESCED_PTR_OFFLOAD inline void copy<_int2,_int4>(_int2 *a, const _int4 *b, int n) {
   for (int i=0; i<n/2; i++) { a[2*i+0].x = b[i].x; a[2*i+0].y = b[i].y; a[2*i+1].x = b[i].z; a[2*i+1].y = b[i].w; }
 }
 
@@ -126,9 +126,9 @@ struct coalesced_ref {
   static_assert(register_elements*register_word_size == sizeof(T), "Data structure length must be divisible by register word size");
   static_assert(memory_word_size / register_word_size != 0, "Memory word size must be a multiplier of register word size");
 
-  OFFLOAD inline explicit coalesced_ref(T* ptr, int sites, int idx) : m_ptr(ptr), sites(sites), idx(idx) {}
+  COALESCED_PTR_OFFLOAD inline explicit coalesced_ref(T* ptr, int sites, int idx) : m_ptr(ptr), sites(sites), idx(idx) {}
 
-  OFFLOAD inline operator T() const {
+  COALESCED_PTR_OFFLOAD inline operator T() const {
     T t;
     memory_word *mem_ptr = reinterpret_cast<memory_word*>(m_ptr);
     memory_word t_mem[ memory_elements ];
@@ -141,55 +141,55 @@ struct coalesced_ref {
     return t;
   }
 
-  OFFLOAD inline coalesced_ref& operator=(const T& t) {
+  COALESCED_PTR_OFFLOAD inline coalesced_ref& operator=(const T& t) {
     memory_word *mem_ptr = reinterpret_cast<memory_word*>(m_ptr);
-    memory_word t_mem[ memory_elements ];
-    copy(t_mem, reinterpret_cast<const register_word*>(&t), memory_elements);
+    const memory_word *t_ptr = reinterpret_cast<const memory_word*>(&t);
     if (site_vector) {
-      for (int i=0; i<memory_elements; i++) mem_ptr[ ((idx/site_vector)*memory_elements + i)*site_vector + idx%site_vector ] = t_mem[i];
+      for (int i=0; i<memory_elements; i++) mem_ptr[ ((idx/site_vector)*memory_elements + i)*site_vector + idx%site_vector ] = t_ptr[i];
     } else {
-      for (int i=0; i<memory_elements; i++) mem_ptr[ i*sites + idx ] = t_mem[i];
+      for (int i=0; i<memory_elements; i++) mem_ptr[ i*sites + idx ] = t_ptr[i];
     }
     return *this;
   }
 
-    OFFLOAD inline const coalesced_ref& operator=(const T& t) const {
-      memory_word *mem_ptr = reinterpret_cast<memory_word*>(m_ptr);
-      memory_word t_mem[ memory_elements ];
-      copy(t_mem, reinterpret_cast<const register_word*>(&t), memory_elements);
-      if (site_vector) {
-	for (int i=0; i<memory_elements; i++) mem_ptr[ ((idx/site_vector)*memory_elements + i)*site_vector + idx%site_vector ] = t_mem[i];
-      } else {
-	for (int i=0; i<memory_elements; i++) mem_ptr[ i*sites + idx ] = t_mem[i];
-      }
-      return *this;
+  COALESCED_PTR_OFFLOAD inline const coalesced_ref& operator=(const T& t) const {
+    memory_word *mem_ptr = reinterpret_cast<memory_word*>(m_ptr);
+    const memory_word *t_ptr = reinterpret_cast<const memory_word*>(&t);
+    if (site_vector) {
+      for (int i=0; i<memory_elements; i++) mem_ptr[ ((idx/site_vector)*memory_elements + i)*site_vector + idx%site_vector ] = t_ptr[i];
+    } else {
+      for (int i=0; i<memory_elements; i++) mem_ptr[ i*sites + idx ] = t_ptr[i];
     }
+    return *this;
+  }
 
-      OFFLOAD inline coalesced_ref& operator=(const coalesced_ref& other) {
-	const memory_word *other_ptr = reinterpret_cast<const memory_word*>(other.m_ptr);
-	memory_word *this_ptr = reinterpret_cast<memory_word*>(m_ptr);
-	if (site_vector) {
-	  for (int i=0; i<memory_elements; i++) this_ptr[ ((idx/site_vector)*memory_elements + i)*site_vector + idx%site_vector ] =
-						  other_ptr[ ((idx/site_vector)*memory_elements + i)*site_vector + idx%site_vector ];
-	} else {
-	  for (int i=0; i<memory_elements; i++) this_ptr[ i*sites + idx ] = other_ptr[ i*sites + idx ];
-	}
-	return *this;
-      }
+  COALESCED_PTR_OFFLOAD inline coalesced_ref& operator=(const coalesced_ref& other) {
+    const memory_word *other_ptr = reinterpret_cast<const memory_word*>(other.m_ptr);
+    memory_word *this_ptr = reinterpret_cast<memory_word*>(m_ptr);
+    if (site_vector) {
+      for (int i=0; i<memory_elements; i++) this_ptr[ ((idx/site_vector)*memory_elements + i)*site_vector + idx%site_vector ] =
+					      other_ptr[ ((idx/site_vector)*memory_elements + i)*site_vector + idx%site_vector ];
+    } else {
+      for (int i=0; i<memory_elements; i++) this_ptr[ i*sites + idx ] = other_ptr[ i*sites + idx ];
+    }
+    return *this;
+  }
 };
 
 #else
+
 template<typename T>
 struct coalesced_ref {
   T* m_ptr;
   const int sites;
   const int idx;
-  inline explicit coalesced_ref(T* ptr, int sites, int idx) : m_ptr(ptr), sites(sites), idx(idx) {}
-  inline operator T() const { return *(m_ptr+idx); }
-  inline coalesced_ref& operator=(const T& t) { *(m_ptr+idx) = t; return *this; }
-    inline const coalesced_ref& operator=(const T& t) const { *(m_ptr+idx) = t; return *this; }
-      inline coalesced_ref& operator=(const coalesced_ref& other) { *(other.m_ptr+idx) = *(m_ptr+idx); return *this; }
+  COALESCED_PTR_OFFLOAD inline explicit coalesced_ref(T* ptr, int sites, int idx) : m_ptr(ptr), sites(sites), idx(idx) {}
+  COALESCED_PTR_OFFLOAD inline operator T() const { return *(m_ptr+idx); }
+  COALESCED_PTR_OFFLOAD inline coalesced_ref& operator=(const T& t) { *(m_ptr+idx) = t; return *this; }
+  COALESCED_PTR_OFFLOAD inline const coalesced_ref& operator=(const T& t) const { *(m_ptr+idx) = t; return *this; }
+  COALESCED_PTR_OFFLOAD inline coalesced_ref& operator=(const coalesced_ref& other) { *(other.m_ptr+idx) = *(m_ptr+idx); return *this; }
 };
+
 #endif
 
 template<typename T>
@@ -197,16 +197,21 @@ struct coalesced_ptr {
   T* m_ptr;
   int sites;
 
-  OFFLOAD inline coalesced_ptr(T* ptr, int sites_) : m_ptr(ptr), sites(sites_) {}
-  OFFLOAD inline coalesced_ptr() : m_ptr(nullptr), sites(0) {}
+  COALESCED_PTR_OFFLOAD inline coalesced_ptr(T* ptr, int sites_) : m_ptr(ptr), sites(sites_) {}
+  COALESCED_PTR_OFFLOAD inline coalesced_ptr() : m_ptr(nullptr), sites(0) {}
 
   template<typename I>
-  OFFLOAD inline coalesced_ref<T> operator[](const I& idx) {
+  COALESCED_PTR_OFFLOAD inline coalesced_ref<T> operator[](const I& idx) {
     return coalesced_ref<T>(m_ptr,sites,idx);
   }
 
   template<typename I>
-  OFFLOAD inline const coalesced_ref<T> operator[](const I& idx) const {
+  COALESCED_PTR_OFFLOAD inline const coalesced_ref<T> operator[](const I& idx) const {
     return coalesced_ref<T>(m_ptr,sites,idx);
   }
 };
+
+
+#ifdef __CUDACC__
+#undef COALESCED_PTR_OFFLOAD
+#endif
